@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MTG Card Scanner → Title-ROI OCR</title>
+  <style>
+    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; line-height: 1.45; }
+    header { margin-bottom: 12px; }
+    .stage { position: relative; display: inline-block; }
+    video, canvas { width: 100%; max-width: 680px; border: 1px solid #ddd; border-radius: 8px; }
+    .roi {
+      position: absolute; border: 2px dashed rgba(0,0,0,0.7); background: rgba(0,0,0,0.05);
+      touch-action: none; cursor: move; border-radius: 6px;
+    }
+    .handle { position: absolute; width: 16px; height: 16px; background: rgba(0,0,0,0.8); border-radius: 50%; }
+    .handle.br { right: -8px; bottom: -8px; cursor: nwse-resize; }
+    button { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; background: #f7f7f7; font-size: 16px; }
+    button:disabled { opacity: 0.5; }
+    #status { font-size: 14px; opacity: 0.9; display:inline-block; margin-top:8px; }
+    #result img { max-width: 100%; border-radius: 8px; border: 1px solid #ddd; }
+    #ocrText { white-space: pre-wrap; background: #fafafa; border: 1px solid #eee; padding: 8px; border-radius: 6px; }
+    .small { font-size: 12px; color: #666; }
+    .warn { color: #b00020; }
+    .ok { color: #0a7f11; }
+    .block { display:block; }
+    .meta p { margin: 6px 0; }
+    .badge { font-size: 12px; padding: 2px 6px; border: 1px solid #ddd; border-radius: 999px; }
+    .row { display: flex; flex-wrap: wrap; gap: 16px; }
+    .col { flex: 1 1 340px; min-width: 320px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MTG Card Scanner → Title-ROI OCR</h1>
+    <p>Scans only the <strong>title bar</strong> area for better accuracy. Drag/resize the box if needed.</p>
+  </header>
+
+  <div class="row">
+    <div class="col">
+      <div class="stage">
+        <video id="video" playsinline muted></video>
+        <div id="roi" class="roi">
+          <div class="handle br"></div>
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <button id="startBtn">Start Camera</button>
+        <button id="scanBtn" disabled>Scan Title &amp; Lookup</button>
+        <button id="swapBtn" disabled>Swap Camera</button>
+      </div>
+      <span id="status" class="block"></span>
+      <canvas id="canvas" hidden></canvas>
+      <p class="small">Tip: Align the box over the card’s name plate (top bar). Good light helps.</p>
+    </div>
+
+    <div class="col">
+      <h3>Result</h3>
+      <div id="result"></div>
+      <div id="actions" style="margin-top:8px;"></div>
+      <details style="margin-top:8px;">
+        <summary>Show OCR text</summary>
+        <pre id="ocrText"></pre>
+      </details>
+    </div>
+  </div>
+
+  <script>
+    var video = document.getElementById('video');
+    var canvas = document.getElementById('canvas');
+    var startBtn = document.getElementById('startBtn');
+    var scanBtn = document.getElementById('scanBtn');
+    var swapBtn = document.getElementById('swapBtn');
+    var statusEl = document.getElementById('status');
+    var resultEl = document.getElementById('result');
+    var actionsEl = document.getElementById('actions');
+    var ocrTextEl = document.getElementById('ocrText');
+    var roi = document.getElementById('roi');
+
+    var currentStream = null;
+    var usingBackCamera = true;
+    var Tesseract = null;
+
+    function logStatus(msg, ok){
+      statusEl.textContent = msg;
+      statusEl.className = (ok ? 'ok' : 'warn') + ' block';
+    }
+
+    function isSecureAllowed() {
+      var loc = window.location;
+      return loc.protocol === 'https:' || loc.hostname === 'localhost' || loc.hostname === '127.0.0.1';
+    }
+
+    function setDefaultROI(){
+      var rect = video.getBoundingClientRect();
+      var W = rect.width, H = rect.height;
+      var left = Math.round(W * 0.08);
+      var top  = Math.round(H * 0.07);
+      var width = Math.round(W * 0.84);
+      var height= Math.round(H * 0.14);
+      roi.style.left = left + 'px';
+      roi.style.top = top + 'px';
+      roi.style.width = width + 'px';
+      roi.style.height= height + 'px';
+    }
+
+    function startCamera(){
+      if (!isSecureAllowed()) { logStatus('Camera requires HTTPS or localhost.', false); return; }
+      if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
+        logStatus('This browser does not support camera access (getUserMedia).', false);
+        return;
+      }
+      var constraints = { audio:false, video:{ facingMode:{ ideal: usingBackCamera ? 'environment' : 'user' } } };
+      navigator.mediaDevices.getUserMedia(constraints).then(function(stream){
+        currentStream = stream;
+        video.srcObject = stream;
+        return video.play();
+      }).then(function(){
+        scanBtn.disabled = false;
+        swapBtn.disabled = false;
+        setDefaultROI();
+        logStatus('Camera started.', true);
+      }).catch(function(e1){
+        navigator.mediaDevices.getUserMedia({ video:true, audio:false }).then(function(stream){
+          currentStream = stream;
+          video.srcObject = stream;
+          return video.play();
+        }).then(function(){
+          scanBtn.disabled = false;
+          swapBtn.disabled = false;
+          setDefaultROI();
+          logStatus('Camera started (fallback).', true);
+        }).catch(function(e2){
+          logStatus('Camera error: ' + (e2 && e2.message ? e2.message : e2), false);
+        });
+      });
+    }
+
+    function stopCamera(){
+      if (currentStream){
+        var tracks = currentStream.getTracks();
+        for (var i=0; i<tracks.length; i++) tracks[i].stop();
+      }
+      currentStream = null;
+      scanBtn.disabled = true;
+      swapBtn.disabled = true;
+      logStatus('Camera stopped.', false);
+    }
+
+    startBtn.addEventListener('click', function(){
+      if (currentStream) stopCamera(); else startCamera();
+    });
+    swapBtn.addEventListener('click', function(){
+      if (!currentStream) return;
+      stopCamera(); usingBackCamera = !usingBackCamera; startCamera();
+    });
+
+    (function(){
+      var dragging = false, resizing = false, startX=0, startY=0, startL=0, startT=0, startW=0, startH=0;
+      var handle = roi.querySelector('.handle.br');
+      roi.addEventListener('pointerdown', function(e){
+        if (e.target === handle){ resizing = true; }
+        else { dragging = true; }
+        startX = e.clientX; startY = e.clientY;
+        var r = roi.getBoundingClientRect();
+        startL = r.left; startT = r.top; startW = r.width; startH = r.height;
+        roi.setPointerCapture(e.pointerId);
+      });
+      roi.addEventListener('pointermove', function(e){
+        if (!dragging && !resizing) return;
+        var dx = e.clientX - startX;
+        var dy = e.clientY - startY;
+        if (dragging){
+          roi.style.left = (startL + dx - video.getBoundingClientRect().left) + 'px';
+          roi.style.top  = (startT + dy - video.getBoundingClientRect().top) + 'px';
+        } else {
+          roi.style.width  = Math.max(40, startW + dx) + 'px';
+          roi.style.height = Math.max(24, startH + dy) + 'px';
+        }
+      });
+      roi.addEventListener('pointerup', function(e){
+        dragging = false; resizing = false;
+        roi.releasePointerCapture(e.pointerId);
+      });
+    })();
+
+    function loadTesseract(){
+      if (Tesseract) return Promise.resolve(Tesseract);
+      return new Promise(function(resolve, reject){
+        var s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+        s.onload = function(){ Tesseract = window.Tesseract; resolve(Tesseract); };
+        s.onerror = function(){ reject(new Error('Failed to load Tesseract.js')); };
+        document.head.appendChild(s);
+      });
+    }
+
+    function preprocessROI(srcCtx, x, y, w, h){
+      var tmp = document.createElement('canvas');
+      tmp.width = w; tmp.height = h;
+      var tctx = tmp.getContext('2d');
+      var imgData = srcCtx.getImageData(x, y, w, h);
+      var d = imgData.data;
+      for (var i=0; i<d.length; i+=4){
+        var r=d[i], g=d[i+1], b=d[i+2];
+        var yv = 0.299*r + 0.587*g + 0.114*b;
+        d[i]=d[i+1]=d[i+2]=yv;
+      }
+      var sum=0;
+      for (var j=0; j<d.length; j+=4){ sum += d[j]; }
+      var mean = sum / (d.length/4);
+      for (var k=0; k<d.length; k+=4){
+        var v = d[k] > mean ? 255 : 0;
+        d[k]=d[k+1]=d[k+2]=v;
+      }
+      tctx.putImageData(imgData, 0, 0);
+      return tmp;
+    }
+
+    function firstTextLine(raw){
+      var lines = (raw || '').split(/[\r\n]+/);
+      for (var i=0; i<lines.length; i++){
+        var l = (lines[i] || '').trim();
+        if (!l) continue;
+        var letters = l.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g, '');
+        if (letters.replace(/\s+/g,'').length >= Math.max(3, Math.floor(l.length*0.6))){
+          return l;
+        }
+      }
+      return (lines[0] || '').trim();
+    }
+
+    function sanitizeName(s){
+      return (s || '')
+        .replace(/[0-9]+/g,' ')
+        .replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g, ' ')
+        .replace(/\s+/g,' ')
+        .trim();
+    }
+
+    function scryfallNamedFuzzy(name){
+      return fetch('https://api.scryfall.com/cards/named?fuzzy=' + encodeURIComponent(name))
+        .then(function(res){ if(!res.ok) throw new Error('named?fuzzy ' + res.status); return res.json(); });
+    }
+
+    function scryfallSearchLangAnyExactPhrase(name){
+      var q = 'lang:any "' + name + '"';
+      var url = 'https://api.scryfall.com/cards/search?q=' + encodeURIComponent(q) + '&include_multilingual=true&unique=prints';
+      return fetch(url).then(function(res){ if(!res.ok) throw new Error('search lang:any ' + res.status); return res.json(); })
+        .then(function(list){ if (list && list.data && list.data.length) return list.data[0]; throw new Error('no results (lang:any)'); });
+    }
+
+    function renderCard(card){
+      resultEl.innerHTML = '';
+      actionsEl.innerHTML = '';
+
+      var img = null;
+      if (card.image_uris && card.image_uris.normal) img = card.image_uris.normal;
+      else if (card.card_faces && card.card_faces[0] && card.card_faces[0].image_uris) img = card.card_faces[0].image_uris.normal;
+
+      var container = document.createElement('div');
+      if (img){
+        var image = document.createElement('img');
+        image.src = img;
+        image.alt = card.name;
+        container.appendChild(image);
+      }
+
+      var printed = card.printed_name ? (' / ' + card.printed_name) : '';
+      var langBadge = '<span class="badge">Lang: ' + (card.lang || 'en') + '</span>';
+      var oracle = (card.oracle_text || '').replace(/\n/g, '<br>');
+      var meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.innerHTML = '<p><strong>' + card.name + printed + '</strong> ' + langBadge + '</p>' +
+                       '<p>' + (card.type_line || '') + '</p>' +
+                       '<p><em>Oracle (English)</em><br>' + oracle + '</p>';
+      container.appendChild(meta);
+      resultEl.appendChild(container);
+
+      var openEnglish = document.createElement('button');
+      openEnglish.textContent = 'Open English on Scryfall';
+      openEnglish.onclick = function(){
+        var url = card.prints_search_uri + '&unique=prints';
+        fetch(url).then(function(res){ return res.json(); }).then(function(data){
+          var english = null;
+          if (data && data.data && data.data.length){
+            for (var i=0; i<data.data.length; i++){
+              if (data.data[i].lang === 'en'){ english = data.data[i]; break; }
+            }
+          }
+          window.open((english && english.scryfall_uri) ? english.scryfall_uri : card.scryfall_uri, '_blank');
+        }).catch(function(){
+          window.open(card.scryfall_uri, '_blank');
+        });
+      };
+      actionsEl.appendChild(openEnglish);
+    }
+
+    function lookupByName(name){
+      if (!name){ logStatus('Empty name.', false); return; }
+      resultEl.innerHTML = '';
+      logStatus('Looking up "' + name + '"…', false);
+      scryfallNamedFuzzy(name).then(function(card){
+        renderCard(card); logStatus('Found via named?fuzzy.', true);
+      }).catch(function(){
+        scryfallSearchLangAnyExactPhrase(name).then(function(card){
+          renderCard(card); logStatus('Found via lang:any exact phrase.', true);
+        }).catch(function(){
+          logStatus('Couldn\\'t find an exact match. Adjust the box and try again.', false);
+        });
+      });
+    }
+
+    scanBtn.addEventListener('click', function(){
+      if (!currentStream){ logStatus('Start camera first.', false); return; }
+      var w = video.videoWidth, h = video.videoHeight;
+      if (!w || !h){ logStatus('Camera not ready yet.', false); return; }
+
+      canvas.width = w; canvas.height = h;
+      var ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, w, h);
+
+      var vb = video.getBoundingClientRect();
+      var rb = roi.getBoundingClientRect();
+      var sx = Math.max(0, Math.round((rb.left - vb.left) * (w / vb.width)));
+      var sy = Math.max(0, Math.round((rb.top  - vb.top ) * (h / vb.height)));
+      var sw = Math.max(1, Math.round(rb.width  * (w / vb.width)));
+      var sh = Math.max(1, Math.round(rb.height * (h / vb.height)));
+
+      var processed = (function preprocessROI(){
+        var tmp = document.createElement('canvas');
+        tmp.width = sw; tmp.height = sh;
+        var tctx = tmp.getContext('2d');
+        var imgData = ctx.getImageData(sx, sy, sw, sh);
+        var d = imgData.data;
+        for (var i=0; i<d.length; i+=4){
+          var r=d[i], g=d[i+1], b=d[i+2];
+          var yv = 0.299*r + 0.587*g + 0.114*b;
+          d[i]=d[i+1]=d[i+2]=yv;
+        }
+        var sum=0;
+        for (var j=0; j<d.length; j+=4){ sum += d[j]; }
+        var mean = sum / (d.length/4);
+        for (var k=0; k<d.length; k+=4){
+          var v = d[k] > mean ? 255 : 0;
+          d[k]=d[k+1]=d[k+2]=v;
+        }
+        tctx.putImageData(imgData, 0, 0);
+        return tmp;
+      })();
+
+      logStatus('Loading OCR…', false);
+      if (Tesseract){ runOCR(); }
+      else {
+        var s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+        s.onload = function(){ Tesseract = window.Tesseract; runOCR(); };
+        s.onerror = function(){ logStatus('Failed to load OCR library.', false); };
+        document.head.appendChild(s);
+      }
+
+      function runOCR(){
+        logStatus('Running OCR on title band…', false);
+        Tesseract.recognize(processed, 'eng+fra', {}).then(function(res){
+          var raw = (res && res.data && res.data.text) ? res.data.text : '';
+          ocrTextEl.textContent = (raw || '').trim();
+          var lines = (raw || '').split(/[\r\n]+/);
+          var first = '';
+          for (var i=0; i<lines.length; i++){
+            var l = (lines[i] || '').trim();
+            if (!l) continue;
+            var letters = l.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g, '');
+            if (letters.replace(/\s+/g,'').length >= Math.max(3, Math.floor(l.length*0.6))){
+              first = l; break;
+            }
+          }
+          if (!first) first = (lines[0] || '').trim();
+          var guess = (first || '')
+            .replace(/[0-9]+/g,' ')
+            .replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g, ' ')
+            .replace(/\s+/g,' ')
+            .trim();
+          if (!guess){ logStatus('No readable title—adjust the box and try again.', false); return; }
+          lookupByName(guess);
+        }).catch(function(err){
+          logStatus('OCR error: ' + (err && err.message ? err.message : err), false);
+        });
+      }
+    });
+
+    if (!isSecureAllowed()) logStatus('HTTPS required for camera access.', false);
+    else logStatus('Tap “Start Camera”, then align the box and scan.', false);
+  </script>
+</body>
+</html>
