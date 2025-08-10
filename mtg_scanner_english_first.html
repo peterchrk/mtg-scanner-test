@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MTG Card Scanner → Scryfall (English-first)</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; line-height: 1.45; }
+    header { margin-bottom: 12px; }
+    video, canvas { width: 100%; max-width: 640px; border: 1px solid #ddd; border-radius: 8px; }
+    .row { display: flex; flex-wrap: wrap; gap: 16px; }
+    .col { flex: 1 1 320px; min-width: 300px; }
+    button { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; background: #f7f7f7; font-size: 16px; }
+    button:disabled { opacity: 0.5; }
+    #status { font-size: 14px; opacity: 0.9; display:inline-block; margin-top:8px; }
+    #result img { max-width: 100%; border-radius: 8px; border: 1px solid #ddd; }
+    #ocrText { white-space: pre-wrap; background: #fafafa; border: 1px solid #eee; padding: 8px; border-radius: 6px; }
+    .hint { font-size: 13px; color: #555; }
+    .small { font-size: 12px; color: #666; }
+    .warn { color: #b00020; }
+    .ok { color: #0a7f11; }
+    .block { display:block; }
+    .meta p { margin: 6px 0; }
+    .badge { font-size: 12px; padding: 2px 6px; border: 1px solid #ddd; border-radius: 999px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MTG Card Scanner → Scryfall</h1>
+    <p class="hint">English-first: you’ll always see the English Oracle text here. Use the button to jump to the English Scryfall page.</p>
+  </header>
+
+  <div class="row">
+    <div class="col">
+      <video id="video" playsinline muted></video>
+      <div style="margin-top:8px;">
+        <button id="startBtn">Start Camera</button>
+        <button id="scanBtn" disabled>Scan &amp; Lookup</button>
+        <button id="swapBtn" disabled>Swap Camera</button>
+      </div>
+      <span id="status" class="block"></span>
+      <canvas id="canvas" hidden></canvas>
+      <p class="small">Tip: Aim at the card name. Good light helps OCR.</p>
+    </div>
+
+    <div class="col">
+      <h3>Result</h3>
+      <div id="result"></div>
+      <div id="actions" style="margin-top:8px;"></div>
+      <details style="margin-top:8px;">
+        <summary>Show OCR text</summary>
+        <pre id="ocrText"></pre>
+      </details>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const startBtn = document.getElementById('startBtn');
+    const scanBtn = document.getElementById('scanBtn');
+    const swapBtn = document.getElementById('swapBtn');
+    const statusEl = document.getElementById('status');
+    const resultEl = document.getElementById('result');
+    const actionsEl = document.getElementById('actions');
+    const ocrTextEl = document.getElementById('ocrText');
+    let currentStream = null;
+    let usingBackCamera = true;
+
+    function logStatus(msg, ok=false) {
+      statusEl.textContent = msg;
+      statusEl.className = ok ? 'ok block' : 'warn block';
+    }
+
+    function isSecureAllowed() {
+      const loc = window.location;
+      return loc.protocol === 'https:' || loc.hostname === 'localhost' || loc.hostname === '127.0.0.1';
+    }
+
+    async function startCamera() {
+      if (!isSecureAllowed()) {
+        logStatus('Camera requires HTTPS or localhost.', false);
+        return;
+      }
+      try {
+        const constraints = { audio:false, video:{ facingMode:{ ideal: usingBackCamera ? 'environment':'user' } } };
+        currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch {
+        try {
+          currentStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:false });
+        } catch (e2) {
+          logStatus('Camera error: ' + e2.message, false);
+          return;
+        }
+      }
+      video.srcObject = currentStream;
+      await video.play().catch(()=>{});
+      scanBtn.disabled = false;
+      swapBtn.disabled = false;
+      logStatus('Camera started.', true);
+    }
+
+    function stopCamera() {
+      if (currentStream) {
+        currentStream.getTracks().forEach(t => t.stop());
+        currentStream = null;
+      }
+      scanBtn.disabled = true;
+      swapBtn.disabled = true;
+      logStatus('Camera stopped.', false);
+    }
+
+    startBtn.addEventListener('click', () => {
+      if (currentStream) stopCamera(); else startCamera();
+    });
+
+    swapBtn.addEventListener('click', () => {
+      if (!currentStream) return;
+      stopCamera();
+      usingBackCamera = !usingBackCamera;
+      startCamera();
+    });
+
+    function extractLikelyName(text) {
+      const lines = text.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
+      if (!lines.length) return '';
+      const candidates = lines.filter(l => /^[\p{L}\p{M}\-\'’ ,.:]+$/u.test(l) && l.length <= 40);
+      return (candidates[0] || lines[0]).replace(/\s+/g, ' ');
+    }
+
+    async function scryfallLookup(name) {
+      const res = await fetch('https://api.scryfall.com/cards/named?fuzzy=' + encodeURIComponent(name));
+      if (!res.ok) throw new Error('Scryfall error ' + res.status);
+      return res.json();
+    }
+
+    function renderCard(card) {
+      resultEl.innerHTML = '';
+      actionsEl.innerHTML = '';
+      let img = card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal;
+      const container = document.createElement('div');
+      if (img) {
+        const image = document.createElement('img');
+        image.src = img;
+        container.appendChild(image);
+      }
+      const printed = card.printed_name ? ` / ${card.printed_name}` : '';
+      const langBadge = `<span class="badge">Lang: ${card.lang || 'en'}</span>`;
+      container.innerHTML += `<p><strong>${card.name}${printed}</strong> ${langBadge}</p>
+                              <p>${card.type_line || ''}</p>
+                              <p><em>Oracle (English)</em><br>${(card.oracle_text || '').replace(/\n/g,'<br>')}</p>`;
+      resultEl.appendChild(container);
+      const openEnglish = document.createElement('button');
+      openEnglish.textContent = 'Open English on Scryfall';
+      openEnglish.onclick = async () => {
+        try {
+          const url = card.prints_search_uri + '&unique=prints';
+          const res = await fetch(url);
+          const data = await res.json();
+          const english = data.data.find(c => c.lang === 'en');
+          window.open(english?.scryfall_uri || card.scryfall_uri, '_blank');
+        } catch {
+          window.open(card.scryfall_uri, '_blank');
+        }
+      };
+      actionsEl.appendChild(openEnglish);
+    }
+
+    scanBtn.addEventListener('click', async () => {
+      if (!currentStream) return logStatus('Start camera first.', false);
+      const w = video.videoWidth, h = video.videoHeight;
+      if (!w || !h) return logStatus('Camera not ready.', false);
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, w, h);
+      logStatus('Running OCR…', false);
+      try {
+        const { data } = await Tesseract.recognize(canvas, 'eng+fra', {});
+        ocrTextEl.textContent = data.text.trim();
+        const guess = extractLikelyName(data.text);
+        if (!guess) return logStatus('No text found.', false);
+        logStatus(`Looking up “${guess}”…`, false);
+        const card = await scryfallLookup(guess);
+        renderCard(card);
+        logStatus('Done.', true);
+      } catch (err) {
+        logStatus('Error: ' + err.message, false);
+      }
+    });
+
+    logStatus(isSecureAllowed() ? 'Tap “Start Camera” to begin.' : 'HTTPS required.', false);
+  </script>
+</body>
+</html>
