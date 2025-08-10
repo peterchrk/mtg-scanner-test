@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Camera Diagnostic</title>
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:16px;line-height:1.45}
+  video{width:100%;max-width:600px;border:1px solid #ddd;border-radius:8px}
+  pre{background:#fafafa;border:1px solid #eee;padding:8px;border-radius:6px;white-space:pre-wrap}
+  button{padding:10px 14px;border-radius:8px;border:1px solid #ccc;background:#f7f7f7}
+</style>
+</head>
+<body>
+<h1>Camera Diagnostic</h1>
+<p>This page helps verify why camera might not start on GitHub Pages.</p>
+<button id="start">Start Camera</button>
+<button id="stop" disabled>Stop</button>
+<div id="info"></div>
+<video id="v" playsinline muted></video>
+<h3>Log</h3>
+<pre id="log"></pre>
+<script>
+const log = (...args) => {
+  const s = document.getElementById('log');
+  s.textContent += args.join(' ') + "\\n";
+  console.log(...args);
+};
+const info = (k,v) => {
+  document.getElementById('info').innerHTML += `<p><strong>${k}:</strong> ${v}</p>`;
+};
+
+let stream = null;
+
+function secureOK(){
+  return location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+}
+
+function featureChecks(){
+  info('URL', location.href);
+  info('Protocol', location.protocol);
+  info('Secure context', (window.isSecureContext ? 'true' : 'false') + (secureOK() ? '' : ' (NOT OK for camera)'));
+  info('mediaDevices', 'mediaDevices' in navigator);
+  info('getUserMedia', !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia));
+  info('permissions API', 'permissions' in navigator);
+}
+
+async function startCam(){
+  if(!secureOK()){ log('NOT SECURE: Use HTTPS or localhost.'); return; }
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}}, audio:false});
+  }catch(e1){
+    log('First getUserMedia failed:', e1 && e1.message);
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({video:true, audio:false});
+    }catch(e2){
+      log('Fallback getUserMedia failed:', e2 && e2.message, e2 && e2.name);
+      alert('Camera error: ' + (e2.message || e2));
+      return;
+    }
+  }
+  const v = document.getElementById('v');
+  v.srcObject = stream;
+  try{ await v.play(); }catch(e){ log('video.play error:', e.message); }
+  document.getElementById('stop').disabled = false;
+  log('Camera started.');
+}
+
+function stopCam(){
+  if(stream){
+    stream.getTracks().forEach(t=>t.stop());
+    stream = null;
+    log('Camera stopped.');
+  }
+  document.getElementById('stop').disabled = true;
+}
+
+document.getElementById('start').addEventListener('click', startCam);
+document.getElementById('stop').addEventListener('click', stopCam);
+
+featureChecks();
+</script>
+</body>
+</html>
