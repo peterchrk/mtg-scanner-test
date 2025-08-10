@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MTG Card Scanner → Scryfall (Defensive)</title>
+  <style>
+    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; line-height: 1.45; }
+    header { margin-bottom: 12px; }
+    video, canvas { width: 100%; max-width: 640px; border: 1px solid #ddd; border-radius: 8px; }
+    .row { display: flex; flex-wrap: wrap; gap: 16px; }
+    .col { flex: 1 1 320px; min-width: 300px; }
+    button { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; background: #f7f7f7; font-size: 16px; }
+    button:disabled { opacity: 0.5; }
+    #status { font-size: 14px; opacity: 0.9; display:inline-block; margin-top:8px; }
+    #result img { max-width: 100%; border-radius: 8px; border: 1px solid #ddd; }
+    #ocrText { white-space: pre-wrap; background: #fafafa; border: 1px solid #eee; padding: 8px; border-radius: 6px; }
+    .small { font-size: 12px; color: #666; }
+    .warn { color: #b00020; }
+    .ok { color: #0a7f11; }
+    .block { display:block; }
+    .meta p { margin: 6px 0; }
+    .badge { font-size: 12px; padding: 2px 6px; border: 1px solid #ddd; border-radius: 999px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MTG Card Scanner → Scryfall</h1>
+    <p>Step 1: <strong>Start Camera</strong> • Step 2: Point at the card name • Step 3: <strong>Scan &amp; Lookup</strong>.</p>
+  </header>
+
+  <div class="row">
+    <div class="col">
+      <video id="video" playsinline muted></video>
+      <div style="margin-top:8px;">
+        <button id="startBtn">Start Camera</button>
+        <button id="scanBtn" disabled>Scan &amp; Lookup</button>
+        <button id="swapBtn" disabled>Swap Camera</button>
+      </div>
+      <span id="status" class="block"></span>
+      <canvas id="canvas" hidden></canvas>
+      <p class="small">If no camera prompt appears, make sure the page is HTTPS and not opened inside another app.</p>
+    </div>
+
+    <div class="col">
+      <h3>Result</h3>
+      <div id="result"></div>
+      <div id="actions" style="margin-top:8px;"></div>
+      <details style="margin-top:8px;">
+        <summary>Show OCR text</summary>
+        <pre id="ocrText"></pre>
+      </details>
+    </div>
+  </div>
+
+  <script>
+    var video = document.getElementById('video');
+    var canvas = document.getElementById('canvas');
+    var startBtn = document.getElementById('startBtn');
+    var scanBtn = document.getElementById('scanBtn');
+    var swapBtn = document.getElementById('swapBtn');
+    var statusEl = document.getElementById('status');
+    var resultEl = document.getElementById('result');
+    var actionsEl = document.getElementById('actions');
+    var ocrTextEl = document.getElementById('ocrText');
+
+    var currentStream = null;
+    var usingBackCamera = true;
+    var Tesseract = null; // will be loaded on demand
+
+    function logStatus(msg, ok){
+      statusEl.textContent = msg;
+      statusEl.className = (ok ? 'ok' : 'warn') + ' block';
+    }
+
+    function isSecureAllowed() {
+      var loc = window.location;
+      return loc.protocol === 'https:' || loc.hostname === 'localhost' || loc.hostname === '127.0.0.1';
+    }
+
+    function startCamera(){
+      if (!isSecureAllowed()) {
+        logStatus('Camera requires HTTPS or localhost. Make sure the URL starts with https://', false);
+        return;
+      }
+      if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
+        logStatus('This browser does not support camera access (getUserMedia).', false);
+        return;
+      }
+      var constraints = { audio:false, video:{ facingMode:{ ideal: usingBackCamera ? 'environment' : 'user' } } };
+      navigator.mediaDevices.getUserMedia(constraints).then(function(stream){
+        currentStream = stream;
+        video.srcObject = stream;
+        return video.play();
+      }).then(function(){
+        scanBtn.disabled = false;
+        swapBtn.disabled = false;
+        logStatus('Camera started.', true);
+      }).catch(function(e1){
+        // Fallback without facingMode
+        navigator.mediaDevices.getUserMedia({ video:true, audio:false }).then(function(stream){
+          currentStream = stream;
+          video.srcObject = stream;
+          return video.play();
+        }).then(function(){
+          scanBtn.disabled = false;
+          swapBtn.disabled = false;
+          logStatus('Camera started (fallback).', true);
+        }).catch(function(e2){
+          logStatus('Camera error: ' + (e2 && e2.message ? e2.message : e2), false);
+        });
+      });
+    }
+
+    function stopCamera(){
+      if (currentStream){
+        var tracks = currentStream.getTracks();
+        for (var i=0; i<tracks.length; i++) tracks[i].stop();
+      }
+      currentStream = null;
+      scanBtn.disabled = true;
+      swapBtn.disabled = true;
+      logStatus('Camera stopped.', false);
+    }
+
+    startBtn.addEventListener('click', function(){
+      if (currentStream) stopCamera(); else startCamera();
+    });
+
+    swapBtn.addEventListener('click', function(){
+      if (!currentStream) return;
+      stopCamera();
+      usingBackCamera = !usingBackCamera;
+      startCamera();
+    });
+
+    function extractLikelyName(text){
+      var lines = text.split(/[\r\n]+/);
+      var filtered = [];
+      for (var i=0; i<lines.length; i++){
+        var l = (lines[i] || '').trim();
+        if (!l) continue;
+        if (/^[A-Za-zÀ-ÖØ-öø-ÿ'\-’ ,.:\u0300-\u036f]+$/.test(l) && l.length <= 40){
+          filtered.push(l);
+        }
+      }
+      var choice = filtered[0] || (text.split(/[\r\n]+/)[0] || '').trim();
+      return (choice || '').replace(/\s+/g, ' ');
+    }
+
+    function scryfallLookup(name){
+      return fetch('https://api.scryfall.com/cards/named?fuzzy=' + encodeURIComponent(name))
+        .then(function(res){
+          if (!res.ok) throw new Error('Scryfall error ' + res.status);
+          return res.json();
+        });
+    }
+
+    function renderCard(card){
+      resultEl.innerHTML = '';
+      actionsEl.innerHTML = '';
+
+      var img = null;
+      if (card.image_uris && card.image_uris.normal) img = card.image_uris.normal;
+      else if (card.card_faces && card.card_faces[0] && card.card_faces[0].image_uris) img = card.card_faces[0].image_uris.normal;
+
+      var container = document.createElement('div');
+      if (img){
+        var image = document.createElement('img');
+        image.src = img;
+        image.alt = card.name;
+        container.appendChild(image);
+      }
+
+      var printed = card.printed_name ? (' / ' + card.printed_name) : '';
+      var langBadge = '<span class="badge">Lang: ' + (card.lang || 'en') + '</span>';
+      var oracle = (card.oracle_text || '').replace(/\n/g, '<br>');
+      var meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.innerHTML = '<p><strong>' + card.name + printed + '</strong> ' + langBadge + '</p>' +
+                       '<p>' + (card.type_line || '') + '</p>' +
+                       '<p><em>Oracle (English)</em><br>' + oracle + '</p>';
+      container.appendChild(meta);
+      resultEl.appendChild(container);
+
+      var openEnglish = document.createElement('button');
+      openEnglish.textContent = 'Open English on Scryfall';
+      openEnglish.onclick = function(){
+        // Try to fetch English printing via prints_search_uri
+        var url = card.prints_search_uri + '&unique=prints';
+        fetch(url).then(function(res){ return res.json(); }).then(function(data){
+          var english = null;
+          if (data && data.data && data.data.length){
+            for (var i=0; i<data.data.length; i++){
+              if (data.data[i].lang === 'en'){ english = data.data[i]; break; }
+            }
+          }
+          window.open((english && english.scryfall_uri) ? english.scryfall_uri : card.scryfall_uri, '_blank');
+        }).catch(function(){
+          window.open(card.scryfall_uri, '_blank');
+        });
+      };
+      actionsEl.appendChild(openEnglish);
+    }
+
+    function loadTesseract(){
+      if (Tesseract) return Promise.resolve(Tesseract);
+      return new Promise(function(resolve, reject){
+        var s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+        s.onload = function(){ Tesseract = window.Tesseract; resolve(Tesseract); };
+        s.onerror = function(){ reject(new Error('Failed to load Tesseract.js')); };
+        document.head.appendChild(s);
+      });
+    }
+
+    scanBtn.addEventListener('click', function(){
+      if (!currentStream){ logStatus('Start camera first.', false); return; }
+      var w = video.videoWidth, h = video.videoHeight;
+      if (!w || !h){ logStatus('Camera not ready yet.', false); return; }
+
+      canvas.width = w; canvas.height = h;
+      var ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, w, h);
+
+      logStatus('Loading OCR…', false);
+      loadTesseract().then(function(){
+        logStatus('Running OCR…', false);
+        return Tesseract.recognize(canvas, 'eng+fra', {});
+      }).then(function(res){
+        var text = (res && res.data && res.data.text) ? res.data.text : '';
+        ocrTextEl.textContent = (text || '').trim();
+        var guess = extractLikelyName(text || '');
+        if (!guess){ logStatus('No readable text found—move closer to the card title.', false); return; }
+        logStatus('Looking up "' + guess + '"…', false);
+        return scryfallLookup(guess);
+      }).then(function(card){
+        if (!card) return;
+        renderCard(card);
+        logStatus('Done.', true);
+      }).catch(function(err){
+        logStatus('Error: ' + (err && err.message ? err.message : err), false);
+      });
+    });
+
+    // Initial status
+    if (!isSecureAllowed()) logStatus('HTTPS required for camera access.', false);
+    else logStatus('Tap “Start Camera” to allow access.', false);
+  </script>
+</body>
+</html>
