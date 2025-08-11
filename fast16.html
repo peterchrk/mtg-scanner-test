@@ -413,9 +413,19 @@
       R: '#FFA07A', // Red
       G: '#98FB98', // Green
     };
-    specificManaCell.style.background = colors.map((color) => colorMap[color] || '#D3D3D3');
+
+    // Map colors to their corresponding hex values
+    const colorBackgrounds = colors.map((color) => colorMap[color] || '#FFFFFF'); // Default to white for unknown colors
+
+    // Create a linear gradient for multicolored cards
+    if (colorBackgrounds.length > 1) {
+      specificManaCell.style.background = `linear-gradient(to right, ${colorBackgrounds.join(', ')})`;
+    } else {
+      specificManaCell.style.background = colorBackgrounds[0]; // Single color
+    }
   } else {
-    specificManaCell.style.background = '#D3D3D3'; // Grey for colorless or numeric mana
+    // Colorless: Match the page background
+    specificManaCell.style.background = '#f4e4c1'; // Page background color
   }
 
   specificManaCell.style.padding = '8px';
