@@ -159,8 +159,13 @@
       currentStream = null; scanBtn.disabled = true; swapBtn.disabled = true; logStatus('Camera stopped.', false);
     }
     startBtn.addEventListener('click', function(){ if (currentStream) stopCamera(); else startCamera(); });
-    swapBtn.addEventListener('click', function(){ if (!currentStream) return; stopCamera(); usingBackCamera = !usingBackCamera; startCamera(); });
-
+    var swapBtn = document.getElementById('swapBtn');
+swapBtn.addEventListener('click', function () {
+  if (!currentStream) return;
+  stopCamera();
+  usingBackCamera = !usingBackCamera;
+  startCamera();
+});
     // ROI resize only (overlay doesn't capture other taps)
     (function(){
       var dragging=false, startX=0,startY=0,startW=0,startH=0;
@@ -233,20 +238,43 @@
       return list.data[0];
     }
 
-    function renderCard(card, label){
-      var img = (card.image_uris && card.image_uris.normal) ? card.image_uris.normal
-              : (card.card_faces && card.card_faces[0] && card.card_faces[0].image_uris ? card.card_faces[0].image_uris.normal : null);
-      var container=document.createElement('div'); container.style.marginBottom='10px';
-      if (img){ var image=document.createElement('img'); image.src=img; image.alt=card.name; container.appendChild(image); }
-      var printed=card.printed_name?(' / '+card.printed_name):'';
-      var langBadge='<span class="badge">'+(label||('Lang: '+(card.lang||'en')) )+'</span>';
-      var meta=document.createElement('div'); meta.className='meta';
-      var oracle=(card.oracle_text||'').replace(/\n/g,'<br>');
-      meta.innerHTML='<p><strong>'+card.name+printed+'</strong> '+langBadge+'</p>'+
-                     '<p>'+(card.type_line||'')+'</p>'+
-                     '<p><em>Oracle (English)</em><br>'+oracle+'</p>';
-      container.appendChild(meta); return container;
-    }
+    function renderCard(card, label) {
+  const img = (card.image_uris && card.image_uris.normal)
+    ? card.image_uris.normal
+    : (card.card_faces && card.card_faces[0] && card.card_faces[0].image_uris
+      ? card.card_faces[0].image_uris.normal
+      : null);
+
+  const container = document.createElement('div');
+  container.style.marginBottom = '10px';
+
+  if (img) {
+    const image = document.createElement('img');
+    image.src = img;
+    image.alt = card.name;
+    container.appendChild(image);
+  }
+
+  const details = document.createElement('details');
+  details.style.marginTop = '8px';
+
+  const summary = document.createElement('summary');
+  summary.textContent = label || 'Card Details';
+  details.appendChild(summary);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const oracle = (card.oracle_text || '').replace(/\n/g, '<br>');
+  meta.innerHTML = `
+    <p><strong>${card.name}</strong></p>
+    <p>${card.type_line || ''}</p>
+    <p><em>Oracle Text:</em><br>${oracle}</p>
+  `;
+  details.appendChild(meta);
+
+  container.appendChild(details);
+  return container;
+}
 
     function showResults(anyCard, enCard, ocrGuess) {
       resultEl.innerHTML = '';
@@ -398,7 +426,7 @@
     const colorBackgrounds = colors.map((color) => colorMap[color] || '#D3D3D3'); // Default to grey for unknown colors
     specificManaCell.style.background = `linear-gradient(to right, ${colorBackgrounds.join(', ')})`;
   } else {
-    specificManaCell.style.background = '#D3D3D3'; // Grey for colorless
+    specificManaCell.style.background = '#D3D3D3'; // Grey for colorless or numeric mana
   }
 
   specificManaCell.style.padding = '8px';
