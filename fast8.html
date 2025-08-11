@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MTG Card Scanner → Fast + Oracle (EN-first)</title>
+  <style>
+    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; line-height: 1.45; }
+    header { margin-bottom: 12px; }
+    .stage { position: relative; display: inline-block; }
+    video, canvas { width: 100%; max-width: 680px; border: 1px solid #ddd; border-radius: 8px; }
+    .roi { position: absolute; border: 2px dashed rgba(0,0,0,0.7); background: rgba(0,0,0,0.05);
+           border-radius: 6px; pointer-events: none; }
+    .handle { position: absolute; width: 16px; height: 16px; background: rgba(0,0,0,0.85); border-radius: 50%; pointer-events: auto; }
+    .handle.br { right: -8px; bottom: -8px; cursor: nwse-resize; }
+    button { padding: 10px 14px; border-radius: 8px; border: 1px solid #ccc; background: #f7f7f7; font-size: 16px; }
+    button:disabled { opacity: 0.5; }
+    #status { font-size: 14px; opacity: 0.9; display:inline-block; margin-top:8px; }
+    #result img { max-width: 100%; border-radius: 8px; border: 1px solid #ddd; }
+    #ocrText { white-space: pre-wrap; background: #fafafa; border: 1px solid #eee; padding: 8px; border-radius: 6px; }
+    .small { font-size: 12px; color: #666; }
+    .warn { color: #b00020; }
+    .ok { color: #0a7f11; }
+    .block { display:block; }
+    .meta p { margin: 6px 0; }
+    .badge { font-size: 12px; padding: 2px 6px; border: 1px solid #ddd; border-radius: 999px; }
+    .row { display: flex; flex-wrap: wrap; gap: 16px; }
+    .col { flex: 1 1 340px; min-width: 320px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MTG Card Scanner → EN-first (fast fuzzy + oracle_id)</h1>
+    <p>Fast path: <code>named?fuzzy</code> → <code>oracleid:... lang:en</code>. Fallback to multilingual only if fuzzy fails.</p>
+  </header>
+
+  <div class="row">
+    <div class="col">
+      <div class="stage">
+        <video id="video" playsinline muted></video>
+        <div id="roi" class="roi">
+          <div class="handle br" title="Drag to resize"></div>
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <button id="startBtn">Start Camera</button>
+        <button id="scanBtn" disabled>Scan Title &amp; Lookup</button>
+        <button id="swapBtn" disabled>Swap Camera</button>
+      </div>
+      <span id="status" class="block"></span>
+      <canvas id="canvas" hidden></canvas>
+      <p class="small">Open via HTTPS. Add <code>?v=5</code> to bypass cache.</p>
+    </div>
+
+    <div class="col">
+      <h3>Result</h3>
+      <div id="result"></div>
+      <div id="actions" style="margin-top:8px;"></div>
+      <details style="margin-top:8px;">
+        <summary>Show OCR text</summary>
+        <pre id="ocrText"></pre>
+      </details>
+    </div>
+  </div>
+
+  <div id="storedLinks" style="margin-top: 24px;">
+    <h3>Lookup Log</h3>
+    <table id="linksTable" style="width: 100%; border-collapse: collapse;">
+      <thead>
+        <tr>
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">French Name</th>
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">English Name</th>
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">Mana Cost</th>
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">Card Text</th>
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">Actions</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <script>
+    var video = document.getElementById('video');
+    var canvas = document.getElementById('canvas');
+    var startBtn = document.getElementById('startBtn');
+    var scanBtn = document.getElementById('scanBtn');
+    var swapBtn = document.getElementById('swapBtn');
+    var statusEl = document.getElementById('status');
+    var resultEl = document.getElementById('result');
+    var actionsEl = document.getElementById('actions');
+    var ocrTextEl = document.getElementById('ocrText');
+    var roi = document.getElementById('roi');
+
+    var currentStream = null;
+    var usingBackCamera = true;
+    var Tesseract = null;
+
+    function logStatus(msg, ok){
+      statusEl.textContent = msg;
+      statusEl.className = (ok ? 'ok' : 'warn') + ' block';
+      console.log('[status]', msg);
+    }
+    function isSecureAllowed() {
+      var loc = window.location;
+      return loc.protocol === 'https:' || loc.hostname === 'localhost' || loc.hostname === '127.0.0.1';
+    }
+    function setDefaultROI(){
+      var rect = video.getBoundingClientRect();
+      var W = rect.width, H = rect.height;
+      var left = Math.round(W * 0.08);
+      var top  = Math.round(H * 0.07);
+      var width = Math.round(W * 0.84);
+      var height= Math.round(H * 0.14);
+      roi.style.left = left + 'px';
+      roi.style.top = top + 'px';
+      roi.style.width = width + 'px';
+      roi.style.height= height + 'px';
+    }
+    function startCamera(){
+      if (!isSecureAllowed()) { logStatus('Camera requires HTTPS or localhost.', false); return; }
+      if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
+        logStatus('This browser does not support camera access (getUserMedia).', false); return;
+      }
+      var constraints = { audio:false, video:{ facingMode:{ ideal: usingBackCamera ? 'environment' : 'user' } } };
+      navigator.mediaDevices.getUserMedia(constraints).then(function(stream){
+        currentStream = stream; video.srcObject = stream; return video.play();
+      }).then(function(){
+        scanBtn.disabled = false; swapBtn.disabled = false; setDefaultROI(); logStatus('Camera started.', true);
+      }).catch(function(e1){
+        navigator.mediaDevices.getUserMedia({ video:true, audio:false }).then(function(stream){
+          currentStream = stream; video.srcObject = stream; return video.play();
+        }).then(function(){ scanBtn.disabled = false; swapBtn.disabled = false; setDefaultROI(); logStatus('Camera started (fallback).', true); })
+        .catch(function(e2){ logStatus('Camera error: ' + (e2 && e2.message ? e2.message : e2), false); alert('Camera error: ' + (e2 && e2.message ? e2.message : e2)); });
+      });
+    }
+    function stopCamera(){
+      if (currentStream){ var tracks = currentStream.getTracks(); for (var i=0;i<tracks.length;i++) tracks[i].stop(); }
+      currentStream = null; scanBtn.disabled = true; swapBtn.disabled = true; logStatus('Camera stopped.', false);
+    }
+    startBtn.addEventListener('click', function(){ if (currentStream) stopCamera(); else startCamera(); });
+    swapBtn.addEventListener('click', function(){ if (!currentStream) return; stopCamera(); usingBackCamera = !usingBackCamera; startCamera(); });
+
+    // ROI resize only (overlay doesn't capture other taps)
+    (function(){
+      var dragging=false, startX=0,startY=0,startW=0,startH=0;
+      var handle = roi.querySelector('.handle.br');
+      roi.addEventListener('dblclick', function(){ setDefaultROI(); });
+      handle.addEventListener('pointerdown', function(e){
+        startX=e.clientX; startY=e.clientY;
+        var r=roi.getBoundingClientRect(); startW=r.width; startH=r.height;
+        handle.setPointerCapture(e.pointerId); dragging=true;
+      });
+      handle.addEventListener('pointermove', function(e){
+        if (!dragging) return;
+        var dx=e.clientX-startX, dy=e.clientY-startY;
+        roi.style.width = Math.max(40, startW+dx) + 'px';
+        roi.style.height= Math.max(24, startH+dy) + 'px';
+      });
+      handle.addEventListener('pointerup', function(e){ dragging=false; handle.releasePointerCapture(e.pointerId); });
+    })();
+
+    function loadTesseract(){
+      if (Tesseract) return Promise.resolve(Tesseract);
+      return new Promise(function(resolve, reject){
+        var s=document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+        s.onload=function(){ Tesseract=window.Tesseract; resolve(Tesseract); };
+        s.onerror=function(){ reject(new Error('Failed to load Tesseract.js')); };
+        document.head.appendChild(s);
+      });
+    }
+    function preprocessROI(ctx, sx, sy, sw, sh){
+      var tmp=document.createElement('canvas'); tmp.width=sw; tmp.height=sh;
+      var tctx=tmp.getContext('2d'); var imgData=ctx.getImageData(sx,sy,sw,sh); var d=imgData.data,i;
+      for(i=0;i<d.length;i+=4){ var yv=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]; d[i]=d[i+1]=d[i+2]=yv; }
+      var sum=0; for(i=0;i<d.length;i+=4){ sum+=d[i]; } var mean=sum/(d.length/4);
+      for(i=0;i<d.length;i+=4){ var v=d[i]>mean?255:0; d[i]=d[i+1]=d[i+2]=v; }
+      tctx.putImageData(imgData,0,0); return tmp;
+    }
+    function firstTextLine(raw){
+      var lines=(raw||'').split(/[\r\n]+/); for(var i=0;i<lines.length;i++){ var l=(lines[i]||'').trim(); if(!l) continue;
+        var letters=l.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g,''); if(letters.replace(/\s+/g,'').length>=Math.max(3, Math.floor(l.length*0.6))) return l; }
+      return (lines[0]||'').trim();
+    }
+    function sanitizeName(s){ return (s||'').replace(/[0-9]+/g,' ').replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g,' ').replace(/\s+/g,' ').trim(); }
+
+    // Fast Scryfall path
+    function scryfallNamedFuzzy(name){
+      return fetch('https://api.scryfall.com/cards/named?fuzzy=' + encodeURIComponent(name))
+        .then(function(res){ if(!res.ok) throw new Error('named?fuzzy ' + res.status); return res.json(); });
+    }
+    function scryfallEnglishByOracle(oracle_id){
+      var q='oracleid:'+oracle_id+' lang:en';
+      var url='https://api.scryfall.com/cards/search?q='+encodeURIComponent(q)+'&unique=prints';
+      return fetch(url).then(function(r){ if(!r.ok) throw new Error('search oracleid '+r.status); return r.json(); });
+    }
+    function scryfallSearchLangAnyExact(name){
+      var q='lang:any "'+name+'"';
+      var url='https://api.scryfall.com/cards/search?q='+encodeURIComponent(q)+'&include_multilingual=true&unique=prints';
+      return fetch(url).then(function(r){ if(!r.ok) throw new Error('search lang:any '+r.status); return r.json(); });
+    }
+
+    function pickEnglish(list){
+      if (!(list && list.data && list.data.length)) return null;
+      for (var i=0;i<list.data.length;i++){
+        var c=list.data[i];
+        if (c.lang==='en' && c.image_uris && c.image_uris.normal) return c;
+      }
+      for (var j=0;j<list.data.length;j++){
+        var c2=list.data[j];
+        if (c2.lang==='en') return c2;
+      }
+      return list.data[0];
+    }
+
+    function renderCard(card, label){
+      var img = (card.image_uris && card.image_uris.normal) ? card.image_uris.normal
+              : (card.card_faces && card.card_faces[0] && card.card_faces[0].image_uris ? card.card_faces[0].image_uris.normal : null);
+      var container=document.createElement('div'); container.style.marginBottom='10px';
+      if (img){ var image=document.createElement('img'); image.src=img; image.alt=card.name; container.appendChild(image); }
+      var printed=card.printed_name?(' / '+card.printed_name):'';
+      var langBadge='<span class="badge">'+(label||('Lang: '+(card.lang||'en')) )+'</span>';
+      var meta=document.createElement('div'); meta.className='meta';
+      var oracle=(card.oracle_text||'').replace(/\n/g,'<br>');
+      meta.innerHTML='<p><strong>'+card.name+printed+'</strong> '+langBadge+'</p>'+
+                     '<p>'+(card.type_line||'')+'</p>'+
+                     '<p><em>Oracle (English)</em><br>'+oracle+'</p>';
+      container.appendChild(meta); return container;
+    }
+
+    function showResults(anyCard, enCard, ocrGuess) {
+      resultEl.innerHTML = '';
+      actionsEl.innerHTML = '';
+
+      if (enCard) resultEl.appendChild(renderCard(enCard, 'English'));
+      if (anyCard && (!enCard || anyCard.lang !== 'en')) {
+        resultEl.appendChild(renderCard(anyCard, 'Scanned printing (' + (anyCard.lang || '') + ')'));
+      }
+
+      if (enCard) {
+        // Automatically log the lookup with Oracle text, card type, and mana cost
+        storeLink(
+          ocrGuess,
+          enCard.name,
+          enCard.scryfall_uri,
+          enCard.oracle_text,
+          enCard.type_line,
+          enCard.mana_cost
+        );
+      }
+    }
+
+    function pipelineFast(name) {
+      resultEl.innerHTML = '';
+      actionsEl.innerHTML = '';
+      logStatus('Fast lookup (fuzzy) for "' + name + '"...', false);
+      scryfallNamedFuzzy(name).then(function (card) {
+        logStatus('Got fuzzy match (' + (card.lang || '?') + '). Fetching English by oracle_id…', false);
+        return scryfallEnglishByOracle(card.oracle_id).then(function (enList) {
+          var enCard = pickEnglish(enList);
+          showResults(card, enCard, name); // Pass the OCR guess (name)
+          logStatus(enCard ? 'Done (English found).' : 'Done (no EN found; showing fuzzy printing).', !!enCard);
+        });
+      }).catch(function () {
+        // Fallback: multilingual exact phrase (slower)
+        logStatus('Fuzzy failed; trying multilingual exact search…', false);
+        scryfallSearchLangAnyExact(name).then(function (list) {
+          if (!(list && list.data && list.data.length)) throw new Error('No multilingual results.');
+          var anyCard = list.data[0];
+          return scryfallEnglishByOracle(anyCard.oracle_id).then(function (enList) {
+            var enCard = pickEnglish(enList);
+            showResults(anyCard, enCard, name); // Pass the OCR guess (name)
+            logStatus(enCard ? 'Done (English via fallback).' : 'Done (fallback but no EN found).', !!enCard);
+          });
+        }).catch(function (err) {
+          logStatus('Lookup failed. Try adjusting ROI or editing the name.', false);
+        });
+      });
+    }
+
+    document.getElementById('scanBtn').addEventListener('click', function(){
+      if (!currentStream){ logStatus('Start camera first.', false); return; }
+      var w=video.videoWidth, h=video.videoHeight; if (!w||!h){ logStatus('Camera not ready yet.', false); return; }
+      canvas.width=w; canvas.height=h; var ctx=canvas.getContext('2d'); ctx.drawImage(video,0,0,w,h);
+      var vb=video.getBoundingClientRect(); var rb=roi.getBoundingClientRect();
+      var sx=Math.max(0, Math.round((rb.left - vb.left) * (w / vb.width)));
+      var sy=Math.max(0, Math.round((rb.top  - vb.top ) * (h / vb.height)));
+      var sw=Math.max(1, Math.round(rb.width  * (w / vb.width)));
+      var sh=Math.max(1, Math.round(rb.height * (h / vb.height)));
+      var processed=(function(){ var tmp=document.createElement('canvas'); tmp.width=sw; tmp.height=sh;
+        var tctx=tmp.getContext('2d'); var imgData=ctx.getImageData(sx,sy,sw,sh); var d=imgData.data,i;
+        for(i=0;i<d.length;i+=4){ var yv=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]; d[i]=d[i+1]=d[i+2]=yv; }
+        var sum=0; for(i=0;i<d.length;i+=4){ sum+=d[i]; } var mean=sum/(d.length/4);
+        for(i=0;i<d.length;i+=4){ var v=d[i]>mean?255:0; d[i]=d[i+1]=d[i+2]=v; }
+        tctx.putImageData(imgData,0,0); return tmp; })();
+      logStatus('Loading OCR…', false);
+      if (Tesseract){ runOCR(); } else { var s=document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+        s.onload=function(){ Tesseract=window.Tesseract; runOCR(); }; s.onerror=function(){ logStatus('Failed to load OCR library.', false); };
+        document.head.appendChild(s); }
+      function runOCR(){
+        logStatus('Running OCR…', false);
+        Tesseract.recognize(processed, 'eng+fra', {}).then(function(res){
+          var raw=(res && res.data && res.data.text) ? res.data.text : ''; ocrTextEl.textContent=(raw||'').trim();
+          var first=(function(){ var lines=(raw||'').split(/[\r\n]+/); for(var i=0;i<lines.length;i++){ var l=(lines[i]||'').trim(); if (!l) continue;
+            var letters=l.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g,''); if (letters.replace(/\s+/g,'').length>=Math.max(3, Math.floor(l.length*0.6))) return l; } return (lines[0]||'').trim(); })();
+          var guess=(first||'').replace(/[0-9]+/g,' ').replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g,' ').replace(/\s+/g,' ').trim();
+          if (!guess){ logStatus('No readable title—adjust the box and try again.', false); return; }
+          pipelineFast(guess);
+        }).catch(function(err){ logStatus('OCR error: '+(err && err.message ? err.message : err), false); });
+      }
+    });
+
+    function storeLink(frenchName, englishName, englishLink, oracleText, cardType, manaCost) {
+  const linksTable = document.getElementById('linksTable').querySelector('tbody');
+  const row = document.createElement('tr');
+
+  // French Name Column
+  const frenchCell = document.createElement('td');
+  frenchCell.textContent = frenchName;
+  frenchCell.style.padding = '8px';
+  row.appendChild(frenchCell);
+
+  // English Name Column
+  const englishCell = document.createElement('td');
+  const link = document.createElement('a');
+  link.href = englishLink;
+  link.textContent = englishName;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  englishCell.appendChild(link);
+  englishCell.style.padding = '8px';
+  row.appendChild(englishCell);
+
+  // Mana Cost Column
+  const manaCell = document.createElement('td');
+  manaCell.textContent = manaCost || 'Unknown';
+  manaCell.style.padding = '8px';
+  row.appendChild(manaCell);
+
+  // Card Text Column (as a button)
+  const textCell = document.createElement('td');
+  const textButton = document.createElement('button');
+  textButton.textContent = 'Show Text';
+  textButton.style.padding = '6px 12px';
+  textButton.style.border = '1px solid #ccc';
+  textButton.style.borderRadius = '4px';
+  textButton.style.background = '#f7f7f7';
+  textButton.onclick = function () {
+    alert(
+      `Card Type: ${cardType || 'Unknown'}\n\nOracle Text:\n${oracleText || 'No card text available.'}`
+    );
+  };
+  textCell.appendChild(textButton);
+  textCell.style.padding = '8px';
+  row.appendChild(textCell);
+
+  // Actions Column (Remove Button)
+  const actionsCell = document.createElement('td');
+  const removeBtn = document.createElement('button');
+  removeBtn.textContent = 'Remove';
+  removeBtn.style.padding = '6px 12px';
+  removeBtn.style.border = '1px solid #ccc';
+  removeBtn.style.borderRadius = '4px';
+  removeBtn.style.background = '#f7f7f7';
+  removeBtn.onclick = function () {
+    linksTable.removeChild(row);
+  };
+  actionsCell.appendChild(removeBtn);
+  actionsCell.style.padding = '8px';
+  row.appendChild(actionsCell);
+
+  // Append the row to the table
+  linksTable.appendChild(row);
+}
+
+    if (!isSecureAllowed()) logStatus('HTTPS required for camera access.', false);
+    else logStatus('Tap “Start Camera”, then align the box and scan.', false);
+  </script>
+</body>
+</html>
