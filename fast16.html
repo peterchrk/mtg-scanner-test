@@ -67,7 +67,6 @@
       </div>
       <span id="status" class="block"></span>
       <canvas id="canvas" hidden></canvas>
-      <!--<p class="small">Open via HTTPS. Add <code>?v=5</code> to bypass cache.</p>-->
     </div>
 
     <div class="col">
@@ -96,6 +95,11 @@
       </thead>
       <tbody></tbody>
     </table>
+  </div>
+
+  <div style="margin-top: 16px;">
+    <input id="manualSearchInput" type="text" placeholder="Type card name..." style="padding: 8px; width: calc(100% - 120px); border: 1px solid #ccc; border-radius: 4px;">
+    <button id="manualSearchBtn" style="padding: 8px 16px; border-radius: 4px; border: 1px solid #ccc; background: #f7f7f7;">Search</button>
   </div>
 
   <script>
@@ -495,6 +499,16 @@
 });
     if (!isSecureAllowed()) logStatus('HTTPS required for camera access.', false);
     else logStatus('Tap “Start Camera”, then align the box and scan.', false);
+
+    document.getElementById('manualSearchBtn').addEventListener('click', function () {
+  const manualInput = document.getElementById('manualSearchInput').value.trim();
+  if (!manualInput) {
+    logStatus('Please enter a card name to search.', false);
+    return;
+  }
+  logStatus(`Searching for "${manualInput}"...`, false);
+  pipelineFast(manualInput); // Use the manual input for the search
+});
   </script>
 </body>
 </html>
