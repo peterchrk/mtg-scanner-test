@@ -3,9 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MTG Card Scanner → Fast + Oracle (EN-first)</title>
+  <title>Le MTG Scanner</title>
   <style>
-    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; line-height: 1.45; }
+    body {
+      font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      margin: 16px;
+      line-height: 1.45;
+      background: #F4E4C1; /* Light yellow background */
+    }
     header { margin-bottom: 12px; }
     .stage { position: relative; display: inline-block; }
     video, canvas { width: 100%; max-width: 680px; border: 1px solid #ddd; border-radius: 8px; }
@@ -26,12 +31,36 @@
     .badge { font-size: 12px; padding: 2px 6px; border: 1px solid #ddd; border-radius: 999px; }
     .row { display: flex; flex-wrap: wrap; gap: 16px; }
     .col { flex: 1 1 340px; min-width: 320px; }
+
+    @media (orientation: landscape) {
+      .row {
+        flex-direction: row;
+        align-items: flex-start;
+      }
+
+      .col {
+        flex: 1 1 50%;
+        min-width: 50%;
+      }
+
+      .stage {
+        margin-right: 16px;
+      }
+
+      #result {
+        margin-left: 16px;
+      }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>MTG Card Scanner → EN-first (fast fuzzy + oracle_id)</h1>
-    <p>Fast path: <code>named?fuzzy</code> → <code>oracleid:... lang:en</code>. Fallback to multilingual only if fuzzy fails.</p>
+  <header style="display: flex; align-items: center; justify-content: center; gap: 16px;">
+    <h1>Le MTG Scanner</h1>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3 2" width="50" height="33" aria-label="French Flag">
+      <rect width="1" height="2" x="0" fill="#0055A4" />
+      <rect width="1" height="2" x="1" fill="#FFFFFF" />
+      <rect width="1" height="2" x="2" fill="#EF4135" />
+    </svg>
   </header>
 
   <div class="row">
@@ -45,11 +74,16 @@
       <div style="margin-top:8px;">
         <button id="startBtn">Start Camera</button>
         <button id="scanBtn" disabled>Scan Title &amp; Lookup</button>
-        <button id="swapBtn" disabled>Swap Camera</button>
       </div>
       <span id="status" class="block"></span>
+
+      <!-- Search Field Moved Here -->
+      <div style="margin-top: 16px;">
+        <input id="manualSearchInput" type="text" placeholder="Type card name..." style="padding: 8px; width: calc(100% - 120px); border: 1px solid #ccc; border-radius: 4px;">
+        <button id="manualSearchBtn" style="padding: 8px 16px; border-radius: 4px; border: 1px solid #ccc; background: #f7f7f7;">Search</button>
+      </div>
+
       <canvas id="canvas" hidden></canvas>
-      <p class="small">Open via HTTPS. Add <code>?v=5</code> to bypass cache.</p>
     </div>
 
     <div class="col">
@@ -63,12 +97,28 @@
     </div>
   </div>
 
+  <div id="storedLinks" style="margin-top: 24px;">
+    <h3>Lookup Log</h3>
+    <table id="linksTable" style="width: 100%; border-collapse: collapse;">
+      <thead>
+        <tr>
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; cursor: pointer;" data-sort="frenchName">French Name</th>
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; cursor: pointer;" data-sort="englishName">English Name</th>
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; cursor: pointer;" data-sort="totalMana">Total Mana</th>
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd; cursor: pointer;" data-sort="specificMana">Specific Mana</th>
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">Card Text</th>
+          <th style="text-align: left; padding: 8px; border-bottom: 1px solid #ddd;">Actions</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
   <script>
     var video = document.getElementById('video');
     var canvas = document.getElementById('canvas');
     var startBtn = document.getElementById('startBtn');
     var scanBtn = document.getElementById('scanBtn');
-    var swapBtn = document.getElementById('swapBtn');
     var statusEl = document.getElementById('status');
     var resultEl = document.getElementById('result');
     var actionsEl = document.getElementById('actions');
@@ -109,21 +159,19 @@
       navigator.mediaDevices.getUserMedia(constraints).then(function(stream){
         currentStream = stream; video.srcObject = stream; return video.play();
       }).then(function(){
-        scanBtn.disabled = false; swapBtn.disabled = false; setDefaultROI(); logStatus('Camera started.', true);
+        scanBtn.disabled = false; setDefaultROI(); logStatus('Camera started.', true);
       }).catch(function(e1){
         navigator.mediaDevices.getUserMedia({ video:true, audio:false }).then(function(stream){
           currentStream = stream; video.srcObject = stream; return video.play();
-        }).then(function(){ scanBtn.disabled = false; swapBtn.disabled = false; setDefaultROI(); logStatus('Camera started (fallback).', true); })
+        }).then(function(){ scanBtn.disabled = false; setDefaultROI(); logStatus('Camera started (fallback).', true); })
         .catch(function(e2){ logStatus('Camera error: ' + (e2 && e2.message ? e2.message : e2), false); alert('Camera error: ' + (e2 && e2.message ? e2.message : e2)); });
       });
     }
     function stopCamera(){
       if (currentStream){ var tracks = currentStream.getTracks(); for (var i=0;i<tracks.length;i++) tracks[i].stop(); }
-      currentStream = null; scanBtn.disabled = true; swapBtn.disabled = true; logStatus('Camera stopped.', false);
+      currentStream = null; scanBtn.disabled = true; logStatus('Camera stopped.', false);
     }
     startBtn.addEventListener('click', function(){ if (currentStream) stopCamera(); else startCamera(); });
-    swapBtn.addEventListener('click', function(){ if (!currentStream) return; stopCamera(); usingBackCamera = !usingBackCamera; startCamera(); });
-
     // ROI resize only (overlay doesn't capture other taps)
     (function(){
       var dragging=false, startX=0,startY=0,startW=0,startH=0;
@@ -196,60 +244,101 @@
       return list.data[0];
     }
 
-    function renderCard(card, label){
-      var img = (card.image_uris && card.image_uris.normal) ? card.image_uris.normal
-              : (card.card_faces && card.card_faces[0] && card.card_faces[0].image_uris ? card.card_faces[0].image_uris.normal : null);
-      var container=document.createElement('div'); container.style.marginBottom='10px';
-      if (img){ var image=document.createElement('img'); image.src=img; image.alt=card.name; container.appendChild(image); }
-      var printed=card.printed_name?(' / '+card.printed_name):'';
-      var langBadge='<span class="badge">'+(label||('Lang: '+(card.lang||'en')) )+'</span>';
-      var meta=document.createElement('div'); meta.className='meta';
-      var oracle=(card.oracle_text||'').replace(/\n/g,'<br>');
-      meta.innerHTML='<p><strong>'+card.name+printed+'</strong> '+langBadge+'</p>'+
-                     '<p>'+(card.type_line||'')+'</p>'+
-                     '<p><em>Oracle (English)</em><br>'+oracle+'</p>';
-      container.appendChild(meta); return container;
-    }
+    function renderCard(card, label) {
+  const img = (card.image_uris && card.image_uris.normal)
+    ? card.image_uris.normal
+    : (card.card_faces && card.card_faces[0] && card.card_faces[0].image_uris
+      ? card.card_faces[0].image_uris.normal
+      : null);
 
-    function showResults(anyCard, enCard){
-      resultEl.innerHTML=''; actionsEl.innerHTML='';
+  const container = document.createElement('div');
+  container.style.marginBottom = '10px';
+
+  if (img) {
+    const image = document.createElement('img');
+    image.src = img;
+    image.alt = card.name;
+    container.appendChild(image);
+  }
+
+  const details = document.createElement('details');
+  details.style.marginTop = '8px';
+
+  const summary = document.createElement('summary');
+  summary.textContent = label || 'Card Details';
+  details.appendChild(summary);
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const oracle = (card.oracle_text || '').replace(/\n/g, '<br>');
+  meta.innerHTML = `
+    <p><strong>${card.name}</strong></p>
+    <p>${card.type_line || ''}</p>
+    <p><em>Oracle Text:</em><br>${oracle}</p>
+  `;
+  details.appendChild(meta);
+
+  container.appendChild(details);
+  return container;
+}
+
+    function showResults(anyCard, enCard, ocrGuess) {
+      resultEl.innerHTML = '';
+      actionsEl.innerHTML = '';
+
       if (enCard) resultEl.appendChild(renderCard(enCard, 'English'));
-      if (anyCard && (!enCard || anyCard.lang!=='en')) resultEl.appendChild(renderCard(anyCard, 'Scanned printing ('+ (anyCard.lang||'') +')'));
-      if (enCard){
-        var bEn=document.createElement('button'); bEn.textContent='Open English on Scryfall';
-        bEn.onclick=function(){ window.open(enCard.scryfall_uri,'_blank','noopener'); };
-        actionsEl.appendChild(bEn);
+
+      if (anyCard && (!enCard || anyCard.lang !== 'en')) {
+        const details = document.createElement('details');
+        details.style.marginTop = '8px';
+
+        const summary = document.createElement('summary');
+        summary.textContent = 'Show French Card';
+        details.appendChild(summary);
+
+        const frenchCard = renderCard(anyCard, 'Scanned printing (' + (anyCard.lang || '') + ')');
+        details.appendChild(frenchCard);
+
+        resultEl.appendChild(details);
       }
-      if (anyCard){
-        var bAny=document.createElement('button'); bAny.textContent='Open Scanned Printing';
-        bAny.style.marginLeft='8px';
-        bAny.onclick=function(){ window.open(anyCard.scryfall_uri,'_blank','noopener'); };
-        actionsEl.appendChild(bAny);
+
+      if (enCard) {
+        // Automatically log the lookup with Oracle text, card type, mana cost, and colors
+        storeLink(
+          ocrGuess,
+          enCard.name,
+          enCard.scryfall_uri,
+          enCard.oracle_text,
+          enCard.type_line,
+          enCard.mana_cost,
+          enCard.colors // Pass the colors array
+        );
       }
     }
 
-    function pipelineFast(name){
-      resultEl.innerHTML=''; actionsEl.innerHTML='';
-      logStatus('Fast lookup (fuzzy) for "'+name+'"...', false);
-      scryfallNamedFuzzy(name).then(function(card){
-        logStatus('Got fuzzy match ('+ (card.lang || '?') +'). Fetching English by oracle_id…', false);
-        return scryfallEnglishByOracle(card.oracle_id).then(function(enList){
+    function pipelineFast(name) {
+      resultEl.innerHTML = '';
+      actionsEl.innerHTML = '';
+      logStatus('Fast lookup (fuzzy) for "' + name + '"...', false);
+      scryfallNamedFuzzy(name).then(function (card) {
+        logStatus('Got fuzzy match (' + (card.lang || '?') + '). Fetching English by oracle_id…', false);
+        return scryfallEnglishByOracle(card.oracle_id).then(function (enList) {
           var enCard = pickEnglish(enList);
-          showResults(card, enCard);
+          showResults(card, enCard, name); // Pass the OCR guess (name)
           logStatus(enCard ? 'Done (English found).' : 'Done (no EN found; showing fuzzy printing).', !!enCard);
         });
-      }).catch(function(){
+      }).catch(function () {
         // Fallback: multilingual exact phrase (slower)
         logStatus('Fuzzy failed; trying multilingual exact search…', false);
-        scryfallSearchLangAnyExact(name).then(function(list){
+        scryfallSearchLangAnyExact(name).then(function (list) {
           if (!(list && list.data && list.data.length)) throw new Error('No multilingual results.');
           var anyCard = list.data[0];
-          return scryfallEnglishByOracle(anyCard.oracle_id).then(function(enList){
+          return scryfallEnglishByOracle(anyCard.oracle_id).then(function (enList) {
             var enCard = pickEnglish(enList);
-            showResults(anyCard, enCard);
+            showResults(anyCard, enCard, name); // Pass the OCR guess (name)
             logStatus(enCard ? 'Done (English via fallback).' : 'Done (fallback but no EN found).', !!enCard);
           });
-        }).catch(function(err){
+        }).catch(function (err) {
           logStatus('Lookup failed. Try adjusting ROI or editing the name.', false);
         });
       });
@@ -274,21 +363,182 @@
       if (Tesseract){ runOCR(); } else { var s=document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
         s.onload=function(){ Tesseract=window.Tesseract; runOCR(); }; s.onerror=function(){ logStatus('Failed to load OCR library.', false); };
         document.head.appendChild(s); }
-      function runOCR(){
-        logStatus('Running OCR…', false);
-        Tesseract.recognize(processed, 'eng+fra', {}).then(function(res){
-          var raw=(res && res.data && res.data.text) ? res.data.text : ''; ocrTextEl.textContent=(raw||'').trim();
-          var first=(function(){ var lines=(raw||'').split(/[\r\n]+/); for(var i=0;i<lines.length;i++){ var l=(lines[i]||'').trim(); if (!l) continue;
-            var letters=l.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g,''); if (letters.replace(/\s+/g,'').length>=Math.max(3, Math.floor(l.length*0.6))) return l; } return (lines[0]||'').trim(); })();
-          var guess=(first||'').replace(/[0-9]+/g,' ').replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g,' ').replace(/\s+/g,' ').trim();
-          if (!guess){ logStatus('No readable title—adjust the box and try again.', false); return; }
-          pipelineFast(guess);
-        }).catch(function(err){ logStatus('OCR error: '+(err && err.message ? err.message : err), false); });
+      function runOCR() {
+  logStatus('Running OCR…', false);
+  Tesseract.recognize(processed, 'eng+fra', {}).then(function (res) {
+    var raw = (res && res.data && res.data.text) ? res.data.text : '';
+    ocrTextEl.textContent = (raw || '').trim();
+    var first = (function () {
+      var lines = (raw || '').split(/[\r\n]+/);
+      for (var i = 0; i < lines.length; i++) {
+        var l = (lines[i] || '').trim();
+        if (!l) continue;
+        var letters = l.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g, '');
+        if (letters.replace(/\s+/g, '').length >= Math.max(3, Math.floor(l.length * 0.6))) return l;
+      }
+      return (lines[0] || '').trim();
+    })();
+    var guess = (first || '').replace(/[0-9]+/g, ' ').replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!guess) {
+      logStatus('No readable title—adjust the box and try again.', false);
+      return;
+    }
+
+    // Autofill the search field with the OCR result
+    document.getElementById('manualSearchInput').value = guess;
+
+    pipelineFast(guess);
+  }).catch(function (err) {
+    logStatus('OCR error: ' + (err && err.message ? err.message : err), false);
+  });
+}
+    });
+
+    function storeLink(frenchName, englishName, englishLink, oracleText, cardType, manaCost, colors) {
+  const linksTable = document.getElementById('linksTable').querySelector('tbody');
+  const row = document.createElement('tr');
+
+  // French Name Column
+  const frenchCell = document.createElement('td');
+  frenchCell.textContent = frenchName;
+  frenchCell.dataset.sortValue = frenchName.toLowerCase(); // For sorting
+  frenchCell.style.padding = '8px';
+  row.appendChild(frenchCell);
+
+  // English Name Column
+  const englishCell = document.createElement('td');
+  const link = document.createElement('a');
+  link.href = englishLink;
+  link.textContent = englishName;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  englishCell.appendChild(link);
+  englishCell.dataset.sortValue = englishName.toLowerCase(); // For sorting
+  englishCell.style.padding = '8px';
+  row.appendChild(englishCell);
+
+  // Total Mana Cost Column
+  const totalManaCell = document.createElement('td');
+  const totalMana = manaCost
+    ? manaCost
+        .match(/\{[^\}]+\}/g) // Match all mana symbols (e.g., {1}, {W}, {G})
+        .reduce((sum, symbol) => {
+          const numericValue = parseInt(symbol.replace(/\D/g, ''), 10); // Extract numeric value
+          return sum + (isNaN(numericValue) ? 1 : numericValue); // Add 1 for symbolic mana (e.g., {W}, {G})
+        }, 0)
+    : 0;
+
+  totalManaCell.textContent = totalMana || '0';
+  totalManaCell.dataset.sortValue = totalMana; // For sorting
+  totalManaCell.style.padding = '8px';
+  row.appendChild(totalManaCell);
+
+  // Specific Mana Cost Column
+  const specificManaCell = document.createElement('td');
+  specificManaCell.textContent = manaCost || 'Unknown';
+  specificManaCell.dataset.sortValue = manaCost || ''; // For sorting
+
+  // Set background color based on card colors
+  if (colors && colors.length > 0) {
+    const colorMap = {
+      W: '#FFFACD', // White
+      U: '#ADD8E6', // Blue
+      B: '#D3D3D3', // Black
+      R: '#FFA07A', // Red
+      G: '#98FB98', // Green
+    };
+
+    // Map colors to their corresponding hex values
+    const colorBackgrounds = colors.map((color) => colorMap[color] || '#FFFFFF'); // Default to white for unknown colors
+
+    // Create a linear gradient for multicolored cards
+    if (colorBackgrounds.length > 1) {
+      specificManaCell.style.background = `linear-gradient(to right, ${colorBackgrounds.join(', ')})`;
+    } else {
+      specificManaCell.style.background = colorBackgrounds[0]; // Single color
+    }
+  } else {
+    // Colorless: Match the page background
+    specificManaCell.style.background = '#f4e4c1'; // Page background color
+  }
+
+  specificManaCell.style.padding = '8px';
+  row.appendChild(specificManaCell);
+
+  // Card Text Column (as a button)
+  const textCell = document.createElement('td');
+  const textButton = document.createElement('button');
+  textButton.textContent = 'Show Text';
+  textButton.style.padding = '6px 12px';
+  textButton.style.border = '1px solid #ccc';
+  textButton.style.borderRadius = '4px';
+  textButton.style.background = '#f7f7f7';
+  textButton.onclick = function () {
+    alert(
+      `Card Title: ${englishName}\nCard Type: ${cardType || 'Unknown'}\n\nOracle Text:\n${oracleText || 'No card text available.'}`
+    );
+  };
+  textCell.appendChild(textButton);
+  textCell.style.padding = '8px';
+  row.appendChild(textCell);
+
+  // Actions Column (Remove Button)
+  const actionsCell = document.createElement('td');
+  const removeBtn = document.createElement('button');
+  removeBtn.textContent = 'Remove';
+  removeBtn.style.padding = '6px 12px';
+  removeBtn.style.border = '1px solid #ccc';
+  removeBtn.style.borderRadius = '4px';
+  removeBtn.style.background = '#f7f7f7';
+  removeBtn.onclick = function () {
+    linksTable.removeChild(row);
+  };
+  actionsCell.appendChild(removeBtn);
+  actionsCell.style.padding = '8px';
+  row.appendChild(actionsCell);
+
+  // Append the row to the table
+  linksTable.appendChild(row);
+}
+
+    document.querySelectorAll('#linksTable thead th[data-sort]').forEach((header) => {
+  header.addEventListener('click', function () {
+    const sortKey = this.getAttribute('data-sort');
+    const tableBody = document.querySelector('#linksTable tbody');
+    const rows = Array.from(tableBody.querySelectorAll('tr'));
+
+    // Determine sort direction
+    const isAscending = this.dataset.sortDirection !== 'asc';
+    this.dataset.sortDirection = isAscending ? 'asc' : 'desc';
+
+    // Sort rows
+    rows.sort((a, b) => {
+      const aValue = a.querySelector(`td:nth-child(${this.cellIndex + 1})`).dataset.sortValue || '';
+      const bValue = b.querySelector(`td:nth-child(${this.cellIndex + 1})`).dataset.sortValue || '';
+
+      if (isAscending) {
+        return aValue.localeCompare(bValue, undefined, { numeric: true });
+      } else {
+        return bValue.localeCompare(aValue, undefined, { numeric: true });
       }
     });
 
+    // Re-append rows in sorted order
+    rows.forEach((row) => tableBody.appendChild(row));
+  });
+});
     if (!isSecureAllowed()) logStatus('HTTPS required for camera access.', false);
     else logStatus('Tap “Start Camera”, then align the box and scan.', false);
+
+    document.getElementById('manualSearchBtn').addEventListener('click', function () {
+  const manualInput = document.getElementById('manualSearchInput').value.trim();
+  if (!manualInput) {
+    logStatus('Please enter a card name to search.', false);
+    return;
+  }
+  logStatus(`Searching for "${manualInput}"...`, false);
+  pipelineFast(manualInput); // Use the manual input for the search
+});
   </script>
 </body>
 </html>
