@@ -5,7 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Le MTG Scanner</title>
   <style>
-    body { font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 16px; line-height: 1.45; }
+    body {
+      font-family: -apple-system, system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      margin: 16px;
+      line-height: 1.45;
+      background: #FFFACD; /* Light yellow background */
+    }
     header { margin-bottom: 12px; }
     .stage { position: relative; display: inline-block; }
     video, canvas { width: 100%; max-width: 680px; border: 1px solid #ddd; border-radius: 8px; }
@@ -49,8 +54,13 @@
   </style>
 </head>
 <body>
-  <header>
+  <header style="display: flex; align-items: center; justify-content: center; gap: 16px;">
     <h1>Le MTG Scanner</h1>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 3 2" width="50" height="33" aria-label="French Flag">
+      <rect width="1" height="2" x="0" fill="#0055A4" />
+      <rect width="1" height="2" x="1" fill="#FFFFFF" />
+      <rect width="1" height="2" x="2" fill="#EF4135" />
+    </svg>
   </header>
 
   <div class="row">
@@ -68,10 +78,6 @@
       <span id="status" class="block"></span>
       <canvas id="canvas" hidden></canvas>
     </div>
-     <div style="margin-top: 16px;">
-    <input id="manualSearchInput" type="text" placeholder="Type card name..." style="padding: 8px; width: calc(100% - 120px); border: 1px solid #ccc; border-radius: 4px;">
-    <button id="manualSearchBtn" style="padding: 8px 16px; border-radius: 4px; border: 1px solid #ccc; background: #f7f7f7;">Search</button>
-  </div>
 
     <div class="col">
       <h3>Result</h3>
@@ -101,6 +107,10 @@
     </table>
   </div>
 
+  <div style="margin-top: 16px;">
+    <input id="manualSearchInput" type="text" placeholder="Type card name..." style="padding: 8px; width: calc(100% - 120px); border: 1px solid #ccc; border-radius: 4px;">
+    <button id="manualSearchBtn" style="padding: 8px 16px; border-radius: 4px; border: 1px solid #ccc; background: #f7f7f7;">Search</button>
+  </div>
 
   <script>
     var video = document.getElementById('video');
@@ -351,17 +361,35 @@
       if (Tesseract){ runOCR(); } else { var s=document.createElement('script'); s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
         s.onload=function(){ Tesseract=window.Tesseract; runOCR(); }; s.onerror=function(){ logStatus('Failed to load OCR library.', false); };
         document.head.appendChild(s); }
-      function runOCR(){
-        logStatus('Running OCR…', false);
-        Tesseract.recognize(processed, 'eng+fra', {}).then(function(res){
-          var raw=(res && res.data && res.data.text) ? res.data.text : ''; ocrTextEl.textContent=(raw||'').trim();
-          var first=(function(){ var lines=(raw||'').split(/[\r\n]+/); for(var i=0;i<lines.length;i++){ var l=(lines[i]||'').trim(); if (!l) continue;
-            var letters=l.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g,''); if (letters.replace(/\s+/g,'').length>=Math.max(3, Math.floor(l.length*0.6))) return l; } return (lines[0]||'').trim(); })();
-          var guess=(first||'').replace(/[0-9]+/g,' ').replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g,' ').replace(/\s+/g,' ').trim();
-          if (!guess){ logStatus('No readable title—adjust the box and try again.', false); return; }
-          pipelineFast(guess);
-        }).catch(function(err){ logStatus('OCR error: '+(err && err.message ? err.message : err), false); });
+      function runOCR() {
+  logStatus('Running OCR…', false);
+  Tesseract.recognize(processed, 'eng+fra', {}).then(function (res) {
+    var raw = (res && res.data && res.data.text) ? res.data.text : '';
+    ocrTextEl.textContent = (raw || '').trim();
+    var first = (function () {
+      var lines = (raw || '').split(/[\r\n]+/);
+      for (var i = 0; i < lines.length; i++) {
+        var l = (lines[i] || '').trim();
+        if (!l) continue;
+        var letters = l.replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g, '');
+        if (letters.replace(/\s+/g, '').length >= Math.max(3, Math.floor(l.length * 0.6))) return l;
       }
+      return (lines[0] || '').trim();
+    })();
+    var guess = (first || '').replace(/[0-9]+/g, ' ').replace(/[^A-Za-zÀ-ÖØ-öø-ÿ'\-’ ]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!guess) {
+      logStatus('No readable title—adjust the box and try again.', false);
+      return;
+    }
+
+    // Autofill the search field with the OCR result
+    document.getElementById('manualSearchInput').value = guess;
+
+    pipelineFast(guess);
+  }).catch(function (err) {
+    logStatus('OCR error: ' + (err && err.message ? err.message : err), false);
+  });
+}
     });
 
     function storeLink(frenchName, englishName, englishLink, oracleText, cardType, manaCost, colors) {
